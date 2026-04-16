@@ -795,26 +795,169 @@ def get_config_path():
 def ensure_dir(path):
     Path(path).mkdir(parents=True, exist_ok=True)
 
-def set_autostart(enabled):
-    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    app_name = "Flashshot"
-    exe_path = sys.executable if getattr(sys, 'frozen', False) else __file__
-    if not getattr(sys, 'frozen', False):
-        exe_path = f'"{sys.executable}" "{__file__}"'
+# ================== 开机自启动（新：任务计划 + 启动文件夹）==================
+def set_autostart(enabled: bool) -> bool:
+    """
+    设置开机自启动（任务计划程序 + 启动文件夹双重保障）
+    返回 True 表示操作成功
+    """
+    task_name = "Flashshot"
+    username = os.environ.get('USERNAME', '')
+    
+    # 获取程序真实启动路径
+    if getattr(sys, 'frozen', False):
+        # 打包后的 exe
+        exe_path = sys.executable
+        working_dir = os.path.dirname(exe_path)
+        arguments = ""
     else:
-        exe_path = f'"{exe_path}"'
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
-        if enabled:
-            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, exe_path)
-            log_message("INFO", "已设置开机自启动")
+        # 开发环境：使用 Python 解释器运行脚本
+        exe_path = sys.executable
+        script_path = os.path.abspath(__file__)
+        working_dir = os.path.dirname(script_path)
+        arguments = f'"{script_path}"'
+    
+    success = False
+    
+    # 1. 任务计划程序方式（首选）
+    if enabled:
+        # 创建任务 XML
+        task_xml = f'''<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>{username}</Author>
+    <Description>Flashshot 开机自启动任务</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{username}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{username}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe_path}</Command>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{working_dir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>'''
+        
+        temp_xml = os.path.join(os.environ['TEMP'], f'{task_name}_autostart.xml')
+        try:
+            with open(temp_xml, 'w', encoding='utf-16') as f:
+                f.write(task_xml)
+            
+            # 创建任务（如果存在则强制覆盖）
+            cmd = f'schtasks /create /tn "{task_name}" /xml "{temp_xml}" /f'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                log_message("INFO", f"任务计划程序自启动已创建: {task_name}")
+                success = True
+            else:
+                log_message("ERROR", f"任务计划创建失败: {result.stderr}")
+        except Exception as e:
+            log_message("ERROR", f"创建任务计划异常: {e}")
+        finally:
+            if os.path.exists(temp_xml):
+                os.remove(temp_xml)
+    else:
+        # 删除任务
+        cmd = f'schtasks /delete /tn "{task_name}" /f'
+        subprocess.run(cmd, shell=True, capture_output=True)
+        log_message("INFO", f"已删除任务计划自启动: {task_name}")
+        success = True
+    
+    # 2. 启动文件夹方式（作为补充，确保万一任务计划失效时仍能启动）
+    startup_folder = os.path.join(os.environ['APPDATA'], 
+                                  r'Microsoft\Windows\Start Menu\Programs\Startup')
+    shortcut_path = os.path.join(startup_folder, "Flashshot.lnk")
+    
+    if enabled:
+        # 创建快捷方式（需要 PowerShell）
+        if getattr(sys, 'frozen', False):
+            target = exe_path
+            args = ""
         else:
-            try: winreg.DeleteValue(key, app_name)
-            except: pass
-            log_message("INFO", "已取消开机自启动")
-        winreg.CloseKey(key)
-    except Exception as e:
-        log_message("ERROR", f"开机自启设置失败: {e}")
+            target = sys.executable
+            args = f'"{__file__}"'
+        
+        # 转义路径中的反斜杠和引号
+        target_escaped = target.replace('\\', '\\\\').replace('"', '\\"')
+        args_escaped = args.replace('\\', '\\\\').replace('"', '\\"')
+        working_dir_escaped = working_dir.replace('\\', '\\\\').replace('"', '\\"')
+        
+        ps_script = f'''
+        $WScriptShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WScriptShell.CreateShortcut("{shortcut_path}")
+        $Shortcut.TargetPath = "{target_escaped}"
+        $Shortcut.Arguments = "{args_escaped}"
+        $Shortcut.WorkingDirectory = "{working_dir_escaped}"
+        $Shortcut.Save()
+        '''
+        try:
+            subprocess.run(['powershell', '-Command', ps_script], capture_output=True, check=False)
+            log_message("INFO", f"启动文件夹快捷方式已创建: {shortcut_path}")
+            success = True
+        except Exception as e:
+            log_message("WARNING", f"创建启动文件夹快捷方式失败: {e}")
+    else:
+        if os.path.exists(shortcut_path):
+            os.remove(shortcut_path)
+            log_message("INFO", "已删除启动文件夹快捷方式")
+    
+    return success
+
+def is_autostart_enabled() -> bool:
+    """检查自启动是否已配置"""
+    task_name = "Flashshot"
+    result = subprocess.run(f'schtasks /query /tn "{task_name}"', shell=True, capture_output=True)
+    if result.returncode == 0:
+        return True
+    startup_lnk = os.path.join(os.environ['APPDATA'], 
+                               r'Microsoft\Windows\Start Menu\Programs\Startup\Flashshot.lnk')
+    return os.path.exists(startup_lnk)
+
+def is_admin():
+    """检查是否以管理员权限运行"""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def elevate():
+    """请求管理员权限并重启"""
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+    sys.exit(0)
 
 def create_desktop_shortcut():
     desktop = os.path.join(get_user_dir(), "Desktop")
@@ -1371,15 +1514,30 @@ class FlashshotApp(QMainWindow):
         self.tray_icon.activated.connect(self.on_tray_activated)
     
     def open_screenshot_dir(self):
-        if self.config and "save_dir" in self.config:
-            dir_path = self.config["save_dir"]
-            ensure_dir(dir_path)
-            try:
-                os.startfile(dir_path)
-                log_message("INFO", f"已打开截图目录: {dir_path}")
-            except Exception as e:
-                log_message("ERROR", f"打开截图目录失败: {e}")
-                self.notification_mgr.show(f"无法打开目录: {str(e)}")
+	    if self.config and "save_dir" in self.config:
+	        dir_path = self.config["save_dir"]
+	        # 转换为绝对路径，避免相对路径导致打开错误位置
+	        abs_path = os.path.abspath(dir_path)
+	        log_message("INFO", f"配置中的保存目录: {dir_path}")
+	        log_message("INFO", f"绝对路径: {abs_path}")
+	        
+	        # 确保目录存在
+	        ensure_dir(abs_path)
+	        
+	        # 如果路径实际指向文档目录，给出警告
+	        docs_path = os.path.join(get_user_dir(), "Documents")
+	        if abs_path == docs_path:
+	            self.notification_mgr.show("警告：当前保存目录为「文档」目录，建议重新设置")
+	        
+	        try:
+	            # 使用 explorer 直接打开，避免 ShellExecute 的安全拦截
+	            subprocess.Popen(['explorer', abs_path], shell=False)
+	            log_message("INFO", f"已打开截图目录: {abs_path}")
+	        except Exception as e:
+	            log_message("ERROR", f"打开截图目录失败: {e}")
+	            self.notification_mgr.show(f"无法打开目录: {str(e)}")
+	    else:
+	        self.notification_mgr.show("未配置保存目录")
     
     def export_manual_log(self):
         try:
@@ -1631,6 +1789,12 @@ def main():
     if sys.platform != "win32":
         QMessageBox.critical(None, "错误", "仅支持 Windows")
         sys.exit(1)
+    
+    # 检查管理员权限，如果未以管理员运行则自动提权（键盘钩子需要管理员权限）
+    if not is_admin():
+        log_message("INFO", "当前不是管理员权限，正在请求提权...")
+        elevate()
+        # elevate 会重启程序，不会执行后续代码
     
     init_logging()
     
