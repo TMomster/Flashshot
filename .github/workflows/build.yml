@@ -1,0 +1,33 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install PySide6 pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onedir --noconsole --name Flashshot --icon=flashshot.ico --add-data "flashshot.ico;." --add-data "resources\Flashshot.png;." --add-data "resources\Flashshot_noti.wav;." --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtSvg --collect-all PySide6 --uac-admin Flashshot.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Flashshot-Windows
+          path: dist/

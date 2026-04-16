@@ -1,0 +1,9 @@
+Flashshot 使用了以下开源软件：
+
+- PySide6 (LGPLv3) - https://www.qt.io/
+  Copyright (C) The Qt Company Ltd.
+  
+- Python 标准库 (PSF License)
+  Copyright (c) Python Software Foundation
+
+本软件基于 LGPL 许可证使用 PySide6，PySide6 的源代码可从 https://code.qt.io/ 获取
